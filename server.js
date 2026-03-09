@@ -16,8 +16,8 @@ const WEBHOOK_100M_400M  = "https://discord.com/api/webhooks/1480500373243433054
 const WEBHOOK_400M_1B    = "https://discord.com/api/webhooks/1480500468454002731/5IW9_2Rk2yNO5qLGalc6ag7WBs875Y1bUm_q7YgYambPRClmAKw42r47o2ZkLn0ogkUl";
 const WEBHOOK_1B_PLUS    = "";
 
-const MIN_THRESHOLD  = 1;  // global minimum M/s to process anything
-const MIN_HIGHLIGHTS = 30; // M/s threshold to also send to highlights
+const MIN_THRESHOLD  = 1;
+const MIN_HIGHLIGHTS = 30;
 
 // ═══════════════════════════════════════════════════════════════
 //     PRIORITY LIST
