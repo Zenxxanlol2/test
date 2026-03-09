@@ -161,8 +161,6 @@ function buildEmbed(best, allBrainrots, color, extra = {}) {
     });
 
     if (extra.jobId) fields.push({ name: "Job ID", value: "```" + extra.jobId + "```", inline: false });
-    if (best.mutation) fields.push({ name: "Mutation", value: "```" + best.mutation + "```", inline: true });
-    if (best.traits)   fields.push({ name: "Traits",   value: "```" + best.traits   + "```", inline: true });
     fields.push({ name: "⚔️ Duel Status", value: best.inDuel ? "```⚠️ IN DUEL — may not be stealable```" : "```✅ Not in duel — stealable```", inline: false });
 
     const embed = {
