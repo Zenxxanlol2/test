@@ -1,5 +1,6 @@
-const express = require("express");
-const fetch   = require("node-fetch");
+const express        = require("express");
+const fetch          = require("node-fetch");
+const { WebSocketServer } = require("ws");
 
 const app = express();
 app.use(express.json());
@@ -15,9 +16,10 @@ const WEBHOOK_10M_100M   = "https://discord.com/api/webhooks/1480500317606121544
 const WEBHOOK_100M_400M  = "https://discord.com/api/webhooks/1480500373243433054/r78pLePj1cqwzW16D0J015StXrboftAZJAC6EjMhIlCmY4G5vOb1mNplfxIyydFbZIao";
 const WEBHOOK_400M_1B    = "https://discord.com/api/webhooks/1480500468454002731/5IW9_2Rk2yNO5qLGalc6ag7WBs875Y1bUm_q7YgYambPRClmAKw42r47o2ZkLn0ogkUl";
 const WEBHOOK_1B_PLUS    = "";
+const WEBHOOK_VOID_USERS = ""; // Discord webhook for void user connect/disconnect
 
-const MIN_THRESHOLD  = 1;
-const MIN_HIGHLIGHTS = 30;
+const MIN_THRESHOLD  = 1;  // global minimum M/s to process anything
+const MIN_HIGHLIGHTS = 30; // M/s threshold to also send to highlights
 
 // ═══════════════════════════════════════════════════════════════
 //     PRIORITY LIST
@@ -161,7 +163,7 @@ function buildEmbed(best, allBrainrots, color, extra = {}) {
     });
 
     if (extra.jobId) fields.push({ name: "Job ID", value: "```" + extra.jobId + "```", inline: false });
-    fields.push({ name: "⚔️ Duel Status", value: best.inDuel ? "```⚠️ IN DUEL — may not be stealable```" : "```✅ Not in duel — stealable```", inline: false });
+    fields.push({ name: "⚔️ Duel Status", value: best.inDuel ? "```⚠️ IN DUEL```" : "```✅ NOT IN DUEL```", inline: false });
 
     const embed = {
         title:     `**${best.name}**`,
@@ -173,6 +175,24 @@ function buildEmbed(best, allBrainrots, color, extra = {}) {
     if (best.thumbnail) embed.thumbnail = { url: best.thumbnail };
 
     return embed;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//     WEBSOCKET - AUTO JOIN RELAY
+// ═══════════════════════════════════════════════════════════════
+
+const WS_PORT          = process.env.WS_PORT || 3002;
+const MAX_RECENT_FINDS = 50;
+const recentFinds      = [];
+const wsClients        = new Set();
+
+function broadcastFind(findData) {
+    const msg = JSON.stringify({ type: "find", ...findData });
+    for (const ws of wsClients) {
+        try { ws.send(msg); } catch (_) {}
+    }
+    recentFinds.unshift(findData);
+    if (recentFinds.length > MAX_RECENT_FINDS) recentFinds.length = MAX_RECENT_FINDS;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -230,7 +250,132 @@ app.post("/webhook", async (req, res) => {
         enqueueWebhook(WEBHOOK_HIGHLIGHTS, { embeds: [buildEmbed(bestFind, brainrots, 0x4b0082, extra)] }, "HIGHLIGHTS");
     }
 
+    broadcastFind({
+        best: {
+            name:      bestFind.name,
+            value:     bestFind.value,
+            mutation:  bestFind.mutation || null,
+            traits:    bestFind.traits   || null,
+            rarity:    bestFind.rarity   || null,
+            thumbnail: bestFind.thumbnail || null,
+            inDuel:    bestFind.inDuel   || false,
+        },
+        allBrainrots: brainrots.map(b => ({ name: b.name, value: b.value })),
+        players:   players  || "?",
+        jobId:     jobId    || "",
+        botName:   botName  || "unknown",
+        timestamp: Date.now(),
+    });
+
     return res.json({ success: true, best: bestFind.name, inDuel: bestFind.inDuel || false });
+});
+
+// ═══════════════════════════════════════════════════════════════
+//     POLL ENDPOINT (for executors that can't use WebSocket)
+// ═══════════════════════════════════════════════════════════════
+
+app.get("/poll", (req, res) => {
+    const since    = parseInt(req.query.since) || 0;
+    const newFinds = recentFinds.filter(f => (f.timestamp || 0) > since);
+    res.json({ finds: newFinds });
+});
+
+// ═══════════════════════════════════════════════════════════════
+//     VOID USER TRACKING
+// ═══════════════════════════════════════════════════════════════
+
+const voidUsers    = new Map(); // UserId -> { lastSeen, jobId, username }
+const VOID_TIMEOUT = 30000;    // 30s without heartbeat = offline
+
+async function notifyVoidUser(userId, username, jobId, isNew) {
+    if (!WEBHOOK_VOID_USERS) return;
+    console.log(`[VOID] ${isNew ? "CONNECT" : "DISCONNECT"}: ${username} (${userId})`);
+
+    let avatarImage = "";
+    try {
+        const resp = await fetch(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=150x150&format=Png&isCircular=true`);
+        const json = await resp.json();
+        if (json.data?.[0]) avatarImage = json.data[0].imageUrl;
+    } catch (e) {
+        console.error("[VOID] Avatar fetch error:", e.message);
+    }
+
+    const jobDisplay = jobId && jobId.length > 0 ? ("`" + jobId.substring(0, 12) + "...`") : "N/A";
+    const embed = {
+        title:  isNew ? "🟢 Void User Connected" : "🔴 Void User Disconnected",
+        color:  isNew ? 0x8A50FF : 0xFF3333,
+        thumbnail: avatarImage ? { url: avatarImage } : undefined,
+        fields: [
+            { name: "👤 Username",     value: String(username || "Unknown"), inline: true },
+            { name: "🆔 User ID",      value: String(userId),                inline: true },
+            { name: "🌐 Job ID",       value: jobDisplay,                    inline: true },
+            { name: "📊 Active Users", value: String(voidUsers.size),        inline: true },
+        ],
+        timestamp: new Date().toISOString(),
+        footer:    { text: "Void Notifier • User Tracker" },
+    };
+
+    try {
+        await fetch(WEBHOOK_VOID_USERS, {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({ embeds: [embed] }),
+        });
+    } catch (e) {
+        console.error("[VOID] Webhook error:", e.message);
+    }
+}
+
+// Clean up stale users every 15s
+setInterval(() => {
+    const now = Date.now();
+    for (const [uid, data] of voidUsers.entries()) {
+        if (now - data.lastSeen >= VOID_TIMEOUT) {
+            voidUsers.delete(uid);
+            notifyVoidUser(uid, data.username, data.jobId, false);
+        }
+    }
+}, 15000);
+
+function handleHeartbeat(userId, jobId, username, res) {
+    const isNew = !voidUsers.has(userId);
+    voidUsers.set(userId, { lastSeen: Date.now(), jobId, username });
+    if (isNew) notifyVoidUser(userId, username, jobId, true);
+
+    const now         = Date.now();
+    const activeUsers = [];
+    for (const [uid, data] of voidUsers.entries()) {
+        if (now - data.lastSeen < VOID_TIMEOUT && data.jobId === jobId) {
+            activeUsers.push(Number(uid));
+        }
+    }
+    res.json({ users: activeUsers });
+}
+
+app.post("/void-heartbeat", (req, res) => {
+    const { userId, jobId, username } = req.body;
+    if (!userId) return res.status(400).json({ error: "missing userId" });
+    handleHeartbeat(String(userId), jobId || "", username || "Unknown", res);
+});
+
+app.get("/void-heartbeat", (req, res) => {
+    const { userId, jobId = "", username = "Unknown" } = req.query;
+    if (!userId) return res.status(400).json({ error: "missing userId" });
+    handleHeartbeat(String(userId), jobId, username, res);
+});
+
+app.get("/void-users", (req, res) => {
+    const jobId       = req.query.jobId || "";
+    const now         = Date.now();
+    const activeUsers = [];
+    for (const [uid, data] of voidUsers.entries()) {
+        if (now - data.lastSeen >= VOID_TIMEOUT) {
+            voidUsers.delete(uid);
+        } else if (data.jobId === jobId) {
+            activeUsers.push(Number(uid));
+        }
+    }
+    res.json({ users: activeUsers });
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -273,4 +418,25 @@ app.listen(PORT, () => {
     console.log(`[SERVER] 100M-400M:  ${WEBHOOK_100M_400M ? "OK" : "NOT SET"}`);
     console.log(`[SERVER] 400M-1B:    ${WEBHOOK_400M_1B   ? "OK" : "NOT SET"}`);
     console.log(`[SERVER] 1B+:        ${WEBHOOK_1B_PLUS   ? "OK" : "NOT SET"}`);
+    console.log(`[SERVER] Void Users: ${WEBHOOK_VOID_USERS ? "OK" : "NOT SET"}`);
 });
+
+// ═══════════════════════════════════════════════════════════════
+//     WEBSOCKET SERVER
+// ═══════════════════════════════════════════════════════════════
+
+const wss = new WebSocketServer({ port: WS_PORT });
+
+wss.on("connection", (ws) => {
+    wsClients.add(ws);
+    console.log(`[WS] Client connected (${wsClients.size} total)`);
+    ws.send(JSON.stringify({ type: "history", finds: recentFinds }));
+
+    ws.on("close", () => {
+        wsClients.delete(ws);
+        console.log(`[WS] Client disconnected (${wsClients.size} total)`);
+    });
+    ws.on("error", () => wsClients.delete(ws));
+});
+
+console.log(`[SERVER] WebSocket on port ${WS_PORT}`);
